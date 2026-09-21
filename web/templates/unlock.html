@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Acceso protegido | LibreCrawl</title>
+    <style>
+        :root { color-scheme: dark; }
+        * { box-sizing: border-box; }
+        body {
+            min-height: 100vh;
+            margin: 0;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+            color: #f8fafc;
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: radial-gradient(circle at top, #223b71, #0b1020 55%);
+        }
+        .card {
+            width: min(100%, 420px);
+            padding: 38px;
+            border: 1px solid rgba(148, 163, 184, .26);
+            border-radius: 20px;
+            background: rgba(15, 23, 42, .88);
+            box-shadow: 0 28px 80px rgba(0, 0, 0, .38);
+        }
+        .icon {
+            width: 48px;
+            height: 48px;
+            display: grid;
+            place-items: center;
+            margin-bottom: 22px;
+            border-radius: 14px;
+            background: #2563eb;
+            font-size: 24px;
+        }
+        h1 { margin: 0 0 10px; font-size: 28px; }
+        p { margin: 0 0 26px; color: #cbd5e1; line-height: 1.55; }
+        label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 650; }
+        input {
+            width: 100%;
+            padding: 13px 14px;
+            border: 1px solid #475569;
+            border-radius: 10px;
+            color: inherit;
+            font: inherit;
+            background: #111827;
+        }
+        input:focus { outline: 3px solid rgba(96, 165, 250, .35); border-color: #60a5fa; }
+        button {
+            width: 100%;
+            margin-top: 18px;
+            padding: 13px 16px;
+            border: 0;
+            border-radius: 10px;
+            color: white;
+            background: #2563eb;
+            cursor: pointer;
+            font: 650 16px inherit;
+        }
+        button:hover { background: #1d4ed8; }
+        button:disabled { cursor: wait; opacity: .72; }
+        #message { min-height: 22px; margin: 16px 0 0; color: #fca5a5; font-size: 14px; }
+        #message.success { color: #86efac; }
+    </style>
+</head>
+<body>
+    <main class="card" aria-labelledby="title">
+        <div class="icon" aria-hidden="true">&#128274;</div>
+        <h1 id="title">LibreCrawl protegido</h1>
+        <p>Introduce la clave de acceso para continuar.</p>
+        <form id="unlock-form">
+            <label for="access-key">Clave de acceso</label>
+            <input id="access-key" name="access-key" type="password" autocomplete="current-password" required autofocus>
+            <button id="submit" type="submit">Desbloquear</button>
+            <p id="message" role="alert" aria-live="polite"></p>
+        </form>
+    </main>
+    <script>
+        const form = document.getElementById('unlock-form');
+        const keyInput = document.getElementById('access-key');
+        const submit = document.getElementById('submit');
+        const message = document.getElementById('message');
+
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            message.textContent = '';
+            message.className = '';
+            submit.disabled = true;
+            submit.textContent = 'Verificando…';
+            try {
+                const response = await fetch('/api/unlock', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ access_key: keyInput.value })
+                });
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    message.textContent = result.message || 'No se pudo validar la clave.';
+                    keyInput.select();
+                    return;
+                }
+                message.textContent = 'Acceso concedido. Abriendo LibreCrawl…';
+                message.className = 'success';
+                window.location.assign('/');
+            } catch (error) {
+                message.textContent = 'No se pudo conectar. Inténtalo de nuevo.';
+            } finally {
+                submit.disabled = false;
+                submit.textContent = 'Desbloquear';
+            }
+        });
+    </script>
+</body>
+</html>

@@ -10,6 +10,7 @@ import secrets
 import string
 import os
 import base64
+import hmac
 from io import StringIO, BytesIO
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for
@@ -45,6 +46,13 @@ DISABLE_REGISTER = args.disable_register or os.getenv('REGISTRATION_DISABLED', '
 DISABLE_GUEST = args.disable_guest or os.getenv('DISABLE_GUEST', '').lower() in ('true', '1', 'yes')
 DEMO_MODE = args.demo or os.getenv('DEMO_MODE', '').lower() in ('true', '1', 'yes')
 SKIP_AUTH = args.dangerously_skip_auth or os.getenv('DANGEROUSLY_SKIP_AUTH', '').lower() in ('true', '1', 'yes')
+# Set ACCESS_GATE_PASSWORD in the deployment environment to replace the
+# multi-user login with one password-protected access screen.
+ACCESS_GATE_PASSWORD = os.getenv('ACCESS_GATE_PASSWORD')
+ACCESS_GATE_ENABLED = bool(ACCESS_GATE_PASSWORD)
+ACCESS_GATE_USERNAME = 'access-gate'
+ACCESS_GATE_MAX_ATTEMPTS = 5
+ACCESS_GATE_WINDOW_SECONDS = 300
 
 app = Flask(__name__, template_folder='web/templates', static_folder='web/static')
 app.secret_key = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
@@ -161,6 +169,41 @@ def skip_auth_login(username):
         print(f"Error in skip_auth_login: {e}")
         return False, f'Login error: {str(e)}'
 
+def login_access_gate_user():
+    """Create or reuse the single internal admin account for access-gate mode."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'users.db'))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM users WHERE username = ?', (ACCESS_GATE_USERNAME,))
+        user = cursor.fetchone()
+
+        if user:
+            user_id = user['id']
+            cursor.execute('UPDATE users SET verified = 1, tier = ? WHERE id = ?', ('admin', user_id))
+        else:
+            from src.auth_db import hash_password
+            password_hash = hash_password(secrets.token_urlsafe(32))
+            cursor.execute('''
+                INSERT INTO users (username, email, password_hash, verified, tier)
+                VALUES (?, ?, ?, 1, 'admin')
+            ''', (ACCESS_GATE_USERNAME, 'access-gate@localhost', password_hash))
+            user_id = cursor.lastrowid
+
+        conn.commit()
+        conn.close()
+
+        session['user_id'] = user_id
+        session['username'] = 'SEOMOS'
+        session['tier'] = 'admin'
+        session['access_granted'] = True
+        session.permanent = True
+        return True
+    except Exception as e:
+        print(f"Error creating access-gate session: {e}")
+        return False
+
 if LOCAL_MODE:
     print("=" * 60)
     print("LOCAL MODE ENABLED")
@@ -190,6 +233,9 @@ if DEMO_MODE:
 
 if SKIP_AUTH:
     print("=" * 60)
+
+if ACCESS_GATE_ENABLED:
+    print("Access gate enabled")
     print("⚠️  DANGEROUSLY SKIP AUTH ENABLED")
     print("Anyone can log in as any username with no password!")
     print("Username is used only to separate per-user sessions.")
@@ -210,10 +256,48 @@ def get_client_ip():
     # Fall back to direct connection IP
     return request.remote_addr
 
+gate_attempts = {}
+gate_attempts_lock = threading.Lock()
+
+def gate_attempt_allowed(client_ip):
+    """Allow a limited number of failed access-key attempts per client IP."""
+    now = time.monotonic()
+    with gate_attempts_lock:
+        attempts = [attempt for attempt in gate_attempts.get(client_ip, [])
+                    if now - attempt < ACCESS_GATE_WINDOW_SECONDS]
+        gate_attempts[client_ip] = attempts
+        return len(attempts) < ACCESS_GATE_MAX_ATTEMPTS
+
+def record_failed_gate_attempt(client_ip):
+    with gate_attempts_lock:
+        gate_attempts.setdefault(client_ip, []).append(time.monotonic())
+
+def clear_gate_attempts(client_ip):
+    with gate_attempts_lock:
+        gate_attempts.pop(client_ip, None)
+
+@app.before_request
+def require_access_gate():
+    """Keep every application route behind the single access-gate session."""
+    if not ACCESS_GATE_ENABLED:
+        return None
+
+    if request.path.startswith('/static/') or request.endpoint in {'unlock_page', 'unlock'}:
+        return None
+    if session.get('access_granted'):
+        return None
+    if request.path.startswith('/api/'):
+        return jsonify({'success': False, 'error': 'Access key required'}), 401
+    return redirect(url_for('unlock_page'))
+
 def login_required(f):
     """Decorator to require login for routes"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        if ACCESS_GATE_ENABLED and not session.get('access_granted'):
+            if request.path.startswith('/api/'):
+                return jsonify({'success': False, 'error': 'Access key required'}), 401
+            return redirect(url_for('unlock_page'))
         # In local mode, auto-login if not already logged in
         if LOCAL_MODE and 'user_id' not in session:
             auto_login_local_mode()
@@ -494,8 +578,44 @@ def generate_issues_json_export(issues):
         'all_issues': issues
     }, indent=2)
 
+@app.route('/unlock')
+def unlock_page():
+    """Render the single-password access screen when the gate is configured."""
+    if not ACCESS_GATE_ENABLED:
+        return redirect(url_for('login_page'))
+    if session.get('access_granted'):
+        return redirect(url_for('index'))
+    return render_template('unlock.html')
+
+@app.route('/api/unlock', methods=['POST'])
+def unlock():
+    """Validate the deployment-only access key and create an admin session."""
+    if not ACCESS_GATE_ENABLED:
+        return jsonify({'success': False, 'message': 'Access gate is not configured'}), 404
+
+    client_ip = get_client_ip()
+    if not gate_attempt_allowed(client_ip):
+        return jsonify({
+            'success': False,
+            'message': 'Too many attempts. Please wait five minutes and try again.'
+        }), 429
+
+    data = request.get_json(silent=True) or {}
+    access_key = data.get('access_key') or ''
+    if not isinstance(access_key, str) or not hmac.compare_digest(access_key, ACCESS_GATE_PASSWORD):
+        record_failed_gate_attempt(client_ip)
+        return jsonify({'success': False, 'message': 'Invalid access key'}), 401
+
+    if not login_access_gate_user():
+        return jsonify({'success': False, 'message': 'Unable to start the protected session'}), 500
+
+    clear_gate_attempts(client_ip)
+    return jsonify({'success': True, 'message': 'Access granted'})
+
 @app.route('/login')
 def login_page():
+    if ACCESS_GATE_ENABLED:
+        return redirect(url_for('unlock_page'))
     # In local mode, auto-login and redirect to index
     if LOCAL_MODE:
         auto_login_local_mode()
@@ -507,6 +627,8 @@ def login_page():
 
 @app.route('/register')
 def register_page():
+    if ACCESS_GATE_ENABLED:
+        return redirect(url_for('index'))
     # Redirect to app if already logged in
     if 'user_id' in session:
         return redirect(url_for('index'))
@@ -612,6 +734,8 @@ def register():
 
 @app.route('/api/login', methods=['POST'])
 def login():
+    if ACCESS_GATE_ENABLED:
+        return jsonify({'success': False, 'message': 'Use the access key screen'}), 404
     data = request.get_json()
     username = (data.get('username') or '').strip()
     password = data.get('password') or ''
@@ -640,6 +764,8 @@ def login():
 @app.route('/api/guest-login', methods=['POST'])
 def guest_login():
     """Login as a guest user (no account required, limited to 3 crawls/24h)"""
+    if ACCESS_GATE_ENABLED:
+        return jsonify({'success': False, 'message': 'Use the access key screen'}), 404
     if DISABLE_GUEST:
         return jsonify({'success': False, 'message': 'Guest login is disabled'})
 
@@ -690,6 +816,8 @@ def user_info():
 
 @app.route('/')
 def index():
+    if ACCESS_GATE_ENABLED and not session.get('access_granted'):
+        return redirect(url_for('unlock_page'))
     # In local mode, auto-login if not already logged in
     if LOCAL_MODE and 'user_id' not in session:
         auto_login_local_mode()
