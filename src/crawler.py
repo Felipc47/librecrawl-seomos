@@ -9,6 +9,7 @@ import threading
 import time
 import asyncio
 import re
+import os
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
@@ -173,6 +174,42 @@ class WebCrawler:
         # Enable nested asyncio for thread compatibility
         nest_asyncio.apply()
 
+    @staticmethod
+    def _safe_positive_int(name, default):
+        """Read an optional deployment limit without trusting malformed values."""
+        try:
+            return max(1, int(os.getenv(name, default)))
+        except (TypeError, ValueError):
+            return default
+
+    def _apply_deployment_limits(self):
+        """Keep a shared VPS crawl within a small, predictable resource budget.
+
+        UI settings are user-controlled, so they must never be the only guard
+        around an application that shares a server with production services.
+        Environment variables allow a larger dedicated worker to opt in later;
+        the defaults are deliberately conservative for this deployment.
+        """
+        max_urls = self._safe_positive_int('LIBRECRAWL_SAFE_MAX_URLS', 500)
+        max_depth = self._safe_positive_int('LIBRECRAWL_SAFE_MAX_DEPTH', 3)
+        max_concurrency = self._safe_positive_int('LIBRECRAWL_SAFE_MAX_CONCURRENCY', 1)
+        max_js_pages = self._safe_positive_int('LIBRECRAWL_SAFE_MAX_JS_PAGES', 1)
+        max_file_mb = self._safe_positive_int('LIBRECRAWL_SAFE_MAX_FILE_SIZE_MB', 10)
+        javascript_allowed = os.getenv('LIBRECRAWL_SAFE_ENABLE_JAVASCRIPT', '').lower() in ('true', '1', 'yes')
+
+        self.config['max_urls'] = min(max(1, int(self.config.get('max_urls', max_urls))), max_urls)
+        self.config['max_depth'] = min(max(1, int(self.config.get('max_depth', max_depth))), max_depth)
+        self.config['concurrency'] = min(max(1, int(self.config.get('concurrency', max_concurrency))), max_concurrency)
+        self.config['js_max_concurrent_pages'] = min(
+            max(1, int(self.config.get('js_max_concurrent_pages', max_js_pages))), max_js_pages)
+        self.config['max_file_size'] = min(
+            max(1, int(self.config.get('max_file_size', max_file_mb * 1024 * 1024))),
+            max_file_mb * 1024 * 1024)
+        # A zero-delay crawl can still saturate a single core even with one worker.
+        self.config['delay'] = max(float(self.config.get('delay', 1.0)), 1.0)
+        self.config['enable_javascript'] = bool(self.config.get('enable_javascript')) and javascript_allowed
+        self.config['enable_pagespeed'] = False
+
     def _set_pool_size(self, concurrency):
         """Size the urllib3 connection pool to the work actually in flight.
 
@@ -306,6 +343,7 @@ class WebCrawler:
             return False, "Crawl already in progress"
 
         try:
+            self._apply_deployment_limits()
             # Validate and normalize URL
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
@@ -518,6 +556,7 @@ class WebCrawler:
             demo_mode = self.config.get('demo_mode', False)
             demo_limit = self.config.get('demo_memory_limit_bytes', 0)
             self.config = crawl_data.get('config_snapshot', self._get_default_config())
+            self._apply_deployment_limits()
             if demo_mode:
                 self.config['demo_mode'] = True
                 self.config['demo_memory_limit_bytes'] = demo_limit
@@ -830,6 +869,7 @@ class WebCrawler:
     def update_config(self, new_config):
         """Update crawler configuration"""
         self.config.update(new_config)
+        self._apply_deployment_limits()
 
         # Update session headers
         self.session.headers.update({

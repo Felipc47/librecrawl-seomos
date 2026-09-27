@@ -363,6 +363,12 @@ def get_session_settings():
 
         return crawler_instances[session_id]['settings']
 
+def another_crawl_is_running():
+    """Only one active crawl may use this shared production VPS at a time."""
+    with instances_lock:
+        return any(instance_data['crawler'].is_running
+                   for instance_data in crawler_instances.values())
+
 def cleanup_old_instances():
     """Remove crawler instances that haven't been accessed in 1 hour"""
     timeout = timedelta(hours=1)
@@ -873,6 +879,12 @@ def start_crawl():
     settings_manager = get_session_settings()
     session_id = session.get('session_id')
 
+    if another_crawl_is_running():
+        return jsonify({
+            'success': False,
+            'error': 'Another crawl is already running. Wait for it to finish or stop it before starting a new crawl.'
+        }), 409
+
     # Apply current settings to crawler before starting
     try:
         crawler_config = settings_manager.get_crawler_config()
@@ -1303,6 +1315,12 @@ def resume_crawl_endpoint(crawl_id):
 
         # Get crawler for this session
         crawler = get_or_create_crawler()
+
+        if another_crawl_is_running():
+            return jsonify({
+                'success': False,
+                'message': 'Another crawl is already running. Stop it before resuming a crawl.'
+            }), 409
 
         # Enforce demo mode limits on resumed crawls
         if DEMO_MODE:

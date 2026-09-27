@@ -75,7 +75,7 @@ class SettingsManager:
         return {
             # Crawler settings
             'maxDepth': 3,
-            'maxUrls': 5000000,
+            'maxUrls': 500,
             'crawlDelay': 1,
             'followRedirects': True,
             'crawlExternalLinks': False,
@@ -108,7 +108,7 @@ class SettingsManager:
             'exportFields': ['url', 'status_code', 'title', 'meta_description', 'h1'],
 
             # Advanced settings
-            'concurrency': 5,
+            'concurrency': 1,
             'memoryLimit': 512,
             'logLevel': 'INFO',
             'saveSession': False,
@@ -125,7 +125,7 @@ class SettingsManager:
             'jsUserAgent': 'LibreCrawl/1.0 (Web Crawler with JavaScript)',
             'jsViewportWidth': 1920,
             'jsViewportHeight': 1080,
-            'jsMaxConcurrentPages': 3,
+            'jsMaxConcurrentPages': 1,
 
             # Custom CSS styling
             'customCSS': '',
